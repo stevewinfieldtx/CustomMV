@@ -4,6 +4,6 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "gunicorn app:app"
+    "startCommand": "gunicorn --timeout 300 app:app"
   }
 }
