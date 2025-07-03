@@ -1,10 +1,6 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
-    "builder": "NIXPACKS"
-  },
-  "deploy": {
-    "startCommand": "gunicorn --timeout 300 app:app"
+    "builder": "PROCFILE"
   }
-
 }
