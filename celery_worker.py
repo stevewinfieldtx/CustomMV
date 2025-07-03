@@ -31,7 +31,7 @@ celery_app = Celery('tasks', broker=REDIS_URL)
 def get_image_prompts_from_gemini(vision, mood, age, num_prompts):
     if not GEMINI_API_KEY: raise Exception('Missing GEMINI_API_KEY')
     prompt = f"Generate {num_prompts} unique, vivid AI art prompts based on the theme '{vision}', with a '{mood}' mood for a '{age}' audience. Return as a JSON list of strings."
-    url = f'https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}'
+    url = f'https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}'
     resp = requests.post(url, json={'contents': [{'parts': [{'text': prompt}]}]}, headers={'Content-Type': 'application/json'})
     resp.raise_for_status()
     cleaned_text = resp.json()['candidates'][0]['content']['parts'][0]['text'].strip().replace('```json', '').replace('```', '').strip()
