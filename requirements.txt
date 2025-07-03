@@ -1,3 +1,4 @@
+
 google-cloud-storage>=2.0.0
 requests>=2.0.0
 Pillow>=10.0.0
@@ -6,3 +7,4 @@ librosa>=0.10.1
 soundfile>=0.12.1
 numpy>=1.26.0
 scipy>=1.11.0
+runware>=0.1
