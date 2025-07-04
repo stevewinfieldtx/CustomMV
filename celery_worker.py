@@ -89,7 +89,7 @@ def generate_images(prompts, num_images):
                 "height": 1152,
                 "steps": 12,
                 "scheduler": "DPM++ 3M",
-                "checkNSFW": True,
+                "checkNSFW": True
             }
         ]
         resp = requests.post(RUNWARE_API_URL, headers=headers, json=payload)
