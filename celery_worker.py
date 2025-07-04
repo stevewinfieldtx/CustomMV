@@ -2,10 +2,10 @@ import os
 import tempfile
 import requests
 import logging
-import uuid
 import json
 import librosa
 import itertools
+import uuid # Added: For UUID generation
 from celery import Celery
 from google.cloud import storage
 from PIL import Image
@@ -22,9 +22,8 @@ logger = logging.getLogger(__name__)
 # Celery will get these from the worker's environment
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 RUNWARE_API_KEY = os.getenv("RUNWARE_API_KEY")
-RUNWARE_API_URL = os.getenv(
-    "RUNWARE_API_URL", "https://api.runware.ai/v1"
-)  # Corrected URL
+# Corrected URL: Removed /generate as per user clarification
+RUNWARE_API_URL = os.getenv("RUNWARE_API_URL", "https://api.runware.ai/v1") 
 GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -33,12 +32,11 @@ celery_app = Celery("tasks", broker=REDIS_URL)
 
 # --- Helper Functions ---
 
-
 def get_image_prompts_from_gemini(vision, mood, age, num_prompts):
     if not GEMINI_API_KEY:
         raise Exception("Missing GEMINI_API_KEY")
     prompt = f"Generate {num_prompts} unique, vivid AI art prompts based on the theme '{vision}', with a '{mood}' mood for a '{age}' audience. Return as a JSON list of strings."
-    # Corrected Gemini model name
+    # Corrected Gemini model name to gemini-2.5-flash
     url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     resp = requests.post(
         url,
@@ -55,7 +53,6 @@ def get_image_prompts_from_gemini(vision, mood, age, num_prompts):
     )
     return json.loads(cleaned_text)
 
-
 def download_audio(url):
     resp = requests.get(url)
     resp.raise_for_status()
@@ -64,7 +61,6 @@ def download_audio(url):
     with open(path, "wb") as f:
         f.write(resp.content)
     return path
-
 
 def generate_images(prompts, num_images):
     if not RUNWARE_API_KEY:
@@ -78,23 +74,32 @@ def generate_images(prompts, num_images):
     for i in range(num_images):
         current_prompt = next(prompt_cycle)
         logger.info(f"Requesting image {i+1}/{num_images}...")
-        # Removed "lora" and "CFGScale" from payload as per debugging
+        
+        # Corrected payload:
+        # - Removed "lora" (civitai model) as per debugging
+        # - Removed "CFGScale"
+        # - Corrected "positivePrompt" to use current_prompt
+        # - Model reverted to "runware:100@1" as it was the previous base model
         payload = [{
             "taskType":      "imageInference",
-            "taskUUID":      str(uuid.uuid4()),
-            "positivePrompt": prompt,
-            "model":         "civitai:641771@719473",
-            "width":         1024,
-            "height":        1024,
+            "taskUUID":      str(uuid.uuid4()), # Added: UUID for task
+            "positivePrompt": current_prompt, # Corrected: uses current_prompt from Gemini
+            "model":         "runware:100@1", # Reverted to previous model
+            "width":         896,
+            "height":        1152,
             "steps": 12,
-            "scheduler": "Euler",		
+            "scheduler": "DPM++ 3M",        
             "numberResults": 1,
-            "outputType":    "URL"
-
-            }
-        ]
+            "outputType":    "URL",
+            "checkNSFW": True # Keep checkNSFW if needed for policy adherence
+        }]
+        
         resp = requests.post(RUNWARE_API_URL, headers=headers, json=payload)
-        resp.raise_for_status()
+        
+        # Added for debugging: Log raw response from Runware AI
+        logger.info(f"Runware API Raw Response: {resp.text}")
+        
+        resp.raise_for_status() # This line will raise HTTPError if status code is 4xx/5xx
         if resp.json().get("images"):
             image_urls.extend(resp.json()["images"])
 
@@ -108,7 +113,6 @@ def generate_images(prompts, num_images):
         paths.append(path)
     return paths
 
-
 def assemble_video(audio_path, image_paths):
     duration = librosa.get_duration(path=audio_path)
     fps = len(image_paths) / duration if duration > 0 else 24
@@ -120,7 +124,6 @@ def assemble_video(audio_path, image_paths):
     final.write_videofile(path, codec="libx264", audio_codec="aac")
     return path
 
-
 def upload_to_gcs(local_path, destination_blob_name):
     client = storage.Client()
     bucket = client.bucket(GCS_BUCKET_NAME)
@@ -129,11 +132,9 @@ def upload_to_gcs(local_path, destination_blob_name):
     blob.make_public()
     return blob.public_url
 
-
 # --- The Celery Task Definition ---
 
-
-@celery_app.task  # Ensure only one decorator
+@celery_app.task # Ensure only one decorator is present
 def create_video_task(task_id, audio_url, original_request):
     logger.info(f"--- [CELERY WORKER] Starting video task {task_id} ---")
     local_audio_path = None  # Initialize to None for finally block safety
@@ -155,7 +156,7 @@ def create_video_task(task_id, audio_url, original_request):
 
         images = generate_images(image_prompts, num_images)
         final_video_path = assemble_video(local_audio_path, images)
-
+        
         upload_to_gcs(final_video_path, f"complete/{task_id}.mp4")
         logger.info(f"--- [CELERY WORKER] Successfully completed task {task_id} ---")
 
