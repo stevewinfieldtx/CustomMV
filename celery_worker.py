@@ -78,18 +78,18 @@ def generate_images(prompts, num_images):
         current_prompt = next(prompt_cycle)
         logger.info(f"Requesting image {i+1}/{num_images}...")
         # Removed "lora" and "CFGScale" from payload as per debugging
-        payload = [
-            {
-                "taskType": "imageInference",
-                "model": "runware:100@1",
-                "positivePrompt": current_prompt,
-                "numberResults": 1,
-                "outputFormat": "JPEG",
-                "width": 896,
-                "height": 1152,
-                "steps": 12,
-                "scheduler": "Euler",
-                "checkNSFW": True
+        payload = [{
+            "taskType":      "imageInference",
+            "taskUUID":      str(uuid.uuid4()),
+            "positivePrompt": prompt,
+            "model":         "civitai:641771@719473",
+            "width":         1024,
+            "height":        1024,
+            "steps": 12,
+            "scheduler": "Euler",		
+            "numberResults": 1,
+            "outputType":    "URL"
+
             }
         ]
         resp = requests.post(RUNWARE_API_URL, headers=headers, json=payload)
