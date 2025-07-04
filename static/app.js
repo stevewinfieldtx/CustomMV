@@ -12,8 +12,12 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const fd = new FormData(form);
             const payload = {
-                mood: fd.get('mood'), age: fd.get('age'),
-                length: fd.get('length'), artist: fd.get('artist'), vision: fd.get('vision')
+                mood: fd.get('mood'),
+                age: fd.get('age'),
+                pricing: fd.get('pricing'),
+                length: parseInt(fd.get('length'), 10),  // now numeric seconds
+                artist: fd.get('artist'),
+                vision: fd.get('vision')
             };
             
             const createResponse = await fetch('/create', {
@@ -30,7 +34,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <h3 class="result-title success-title"><i class="fas fa-check-circle"></i> Success!</h3>
                     <div class="result-content">
                         <p>${data.message}</p>
-                        <p>You can check your Google Cloud Storage 'complete' folder for the final video in a few minutes.</p>
+                        <p>Please check your Google Cloud Storage 'complete' folder for the final ${payload.length}s video in a few minutes.</p>
                     </div>
                 </div>`;
 
