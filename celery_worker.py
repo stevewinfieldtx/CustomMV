@@ -10,8 +10,7 @@ from celery import Celery
 from google.cloud import storage
 from PIL import Image
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
-from moviepy.audio.io.AudioFileClip import AudioFileClip
-from moviepy.editor import AudioFileClip as EditorAudioFileClip # ADDED THIS IMPORT
+from moviepy.audio.io.AudioFileClip import AudioFileClip # KEEP THIS ONE
 
 # --- Configure logging ---
 logging.basicConfig(
@@ -130,7 +129,7 @@ def assemble_video(audio_path, image_paths):
         fps = 1
         
     clip = ImageSequenceClip(image_paths, fps=fps)
-    audio_clip = EditorAudioFileClip(audio_path) # Changed to EditorAudioFileClip
+    audio_clip = AudioFileClip(audio_path) # Changed back to AudioFileClip
     final = clip.set_audio(audio_clip).set_duration(audio_clip.duration)
     fd, path = tempfile.mkstemp(suffix=".mp4")
     os.close(fd)
@@ -168,9 +167,9 @@ def create_video_task(task_id, audio_url, original_request):
 
         logger.info(f"Task {task_id}: Desired video length: {desired_duration_sec}s, Num images to generate: {num_images}")
 
-        full_audio_clip = EditorAudioFileClip(local_audio_path) # Changed to EditorAudioFileClip
+        full_audio_clip = AudioFileClip(local_audio_path) # Changed back to AudioFileClip
         final_audio_duration = min(desired_duration_sec, full_audio_clip.duration)
-        truncated_audio_clip = full_audio_clip.subclip(0, final_audio_duration)
+        truncated_audio_clip = full_audio_clip.subclip(0, final_audio_duration) # This line uses subclip
         
         fd_trunc, truncated_audio_path = tempfile.mkstemp(suffix=".mp3")
         os.close(fd_trunc)
