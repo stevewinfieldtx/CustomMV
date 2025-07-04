@@ -6,7 +6,7 @@ import json
 import librosa
 import itertools
 import uuid
-import soundfile as sf # ADDED: For saving truncated audio
+import soundfile as sf # Added: For saving truncated audio
 from celery import Celery
 from google.cloud import storage
 from PIL import Image
@@ -22,9 +22,8 @@ logger = logging.getLogger(__name__)
 # --- Get environment variables ---
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 RUNWARE_API_KEY = os.getenv("RUNWARE_API_KEY")
-RUNWARE_API_URL = os.getenv(
-    "RUNWARE_API_URL", "https://api.runware.ai/v1"
-)
+# Corrected URL: Removed /generate as per user clarification
+RUNWARE_API_URL = os.getenv("RUNWARE_API_URL", "https://api.runware.ai/v1") 
 GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -95,6 +94,7 @@ def generate_images(prompts, num_images):
             image_urls.extend(resp.json()["images"])
 
     paths = []
+    # --- Added robust error handling for image downloads ---
     for i, url in enumerate(image_urls):
         try:
             logger.info(f"Downloading image {i+1}/{len(image_urls)} from URL: {url}")
@@ -130,8 +130,8 @@ def assemble_video(audio_path, image_paths):
         fps = 1
         
     clip = ImageSequenceClip(image_paths, fps=fps)
-    audio_clip = AudioFileClip(audio_path) # Use AudioFileClip from moviepy.audio.io
-    final = clip.set_audio(audio_clip).set_duration(audio_clip.duration) # Duration is set here
+    audio_clip = AudioFileClip(audio_path)
+    final = clip.set_audio(audio_clip).set_duration(audio_clip.duration)
     fd, path = tempfile.mkstemp(suffix=".mp4")
     os.close(fd)
     final.write_videofile(path, codec="libx264", audio_codec="aac")
@@ -191,7 +191,7 @@ def create_video_task(task_id, audio_url, original_request):
         )
 
         images = generate_images(image_prompts, num_images)
-        final_video_path = assemble_video(truncated_audio_path, images) # Use truncated audio path
+        final_video_path = assemble_video(truncated_audio_path, images)
         
         upload_to_gcs(final_video_path, f"complete/{task_id}.mp4")
         logger.info(f"--- [CELERY WORKER] Successfully completed task {task_id} ---")
