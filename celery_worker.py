@@ -6,11 +6,12 @@ import json
 import librosa
 import itertools
 import uuid
+import soundfile as sf # ADDED: For saving truncated audio
 from celery import Celery
 from google.cloud import storage
 from PIL import Image
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
-from moviepy.audio.io.AudioFileClip import AudioFileClip # KEEP THIS ONE
+from moviepy.audio.io.AudioFileClip import AudioFileClip # This is the AudioFileClip you have
 
 # --- Configure logging ---
 logging.basicConfig(
@@ -129,8 +130,8 @@ def assemble_video(audio_path, image_paths):
         fps = 1
         
     clip = ImageSequenceClip(image_paths, fps=fps)
-    audio_clip = AudioFileClip(audio_path) # Changed back to AudioFileClip
-    final = clip.set_audio(audio_clip).set_duration(audio_clip.duration)
+    audio_clip = AudioFileClip(audio_path) # Use AudioFileClip from moviepy.audio.io
+    final = clip.set_audio(audio_clip).set_duration(audio_clip.duration) # Duration is set here
     fd, path = tempfile.mkstemp(suffix=".mp4")
     os.close(fd)
     final.write_videofile(path, codec="libx264", audio_codec="aac")
@@ -150,31 +151,37 @@ def create_video_task(task_id, audio_url, original_request):
     local_audio_path = None
     images = []
     final_video_path = None
-    truncated_audio_path = None
+    truncated_audio_path = None # Will store path to truncated audio file
     try:
         local_audio_path = download_audio(audio_url)
-        y, sr = librosa.load(local_audio_path)
+        # Load audio with librosa to get original sampling rate (sr)
+        y, sr = librosa.load(local_audio_path, sr=None) 
         
+        # Determine desired duration in seconds from original_request
         desired_length_tag = original_request.get('length', 'medium').lower()
-        desired_duration_sec = 60
+        desired_duration_sec = 60 # Default to medium
         if 'short' in desired_length_tag:
             desired_duration_sec = 30
         elif 'long' in desired_length_tag:
             desired_duration_sec = 90
         
-        num_images = max(8, int(desired_duration_sec * 0.5))
+        num_images = max(8, int(desired_duration_sec * 0.5)) # Cap images by desired duration
         num_prompts = num_images // 2
 
         logger.info(f"Task {task_id}: Desired video length: {desired_duration_sec}s, Num images to generate: {num_images}")
 
-        full_audio_clip = AudioFileClip(local_audio_path) # Changed back to AudioFileClip
-        final_audio_duration = min(desired_duration_sec, full_audio_clip.duration)
-        truncated_audio_clip = full_audio_clip.subclip(0, final_audio_duration) # This line uses subclip
+        # --- MANUAL AUDIO TRUNCATION using librosa and soundfile ---
+        # Calculate number of samples for desired duration
+        target_samples = int(desired_duration_sec * sr)
         
+        # Truncate audio data array
+        y_truncated = y[:target_samples]
+        
+        # Save truncated audio to a new temporary file
         fd_trunc, truncated_audio_path = tempfile.mkstemp(suffix=".mp3")
         os.close(fd_trunc)
-        truncated_audio_clip.write_audiofile(truncated_audio_path, codec="aac")
-        truncated_audio_clip.close()
+        sf.write(truncated_audio_path, y_truncated, sr, format='mp3') # Save with soundfile, explicitly format as mp3
+        logger.info(f"Audio truncated to {desired_duration_sec}s and saved to {truncated_audio_path}")
 
         image_prompts = get_image_prompts_from_gemini(
             vision=original_request.get('vision', ''),
@@ -184,7 +191,7 @@ def create_video_task(task_id, audio_url, original_request):
         )
 
         images = generate_images(image_prompts, num_images)
-        final_video_path = assemble_video(truncated_audio_path, images)
+        final_video_path = assemble_video(truncated_audio_path, images) # Use truncated audio path
         
         upload_to_gcs(final_video_path, f"complete/{task_id}.mp4")
         logger.info(f"--- [CELERY WORKER] Successfully completed task {task_id} ---")
@@ -192,11 +199,13 @@ def create_video_task(task_id, audio_url, original_request):
     except Exception as e:
         logger.error(f"!!! [CELERY WORKER] FAILED task {task_id}: {e} !!!", exc_info=True)
     finally:
+        # Rename the original local audio file (full length)
         if local_audio_path and os.path.exists(local_audio_path):
             new_audio_path = local_audio_path.replace('.mp3', '_DONE.mp3')
             os.rename(local_audio_path, new_audio_path)
             logger.info(f"Original audio file renamed to: {new_audio_path}")
 
+        # Clean up other temporary files (truncated audio, final video, images)
         cleanup_files = [truncated_audio_path, final_video_path] + images
         for p in cleanup_files:
             if p and os.path.exists(p): os.remove(p)
