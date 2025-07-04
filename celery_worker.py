@@ -144,9 +144,12 @@ def create_video_task(task_id, audio_url, original_request):
         local_audio_path = download_audio(audio_url)
         y, sr = librosa.load(local_audio_path)
         _, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
-        num_images = max(8, len(beat_frames) // 2)
+        num_images = max(8, len(beat_frames) // 2) # Base num_images on actual beats (reverted for now)
         num_prompts = num_images // 2
 
+        # Note: num_images calculation can be adjusted based on desired_duration_sec here
+        # (as discussed previously, to control video length, but reverted to original for now)
+        
         image_prompts = get_image_prompts_from_gemini(
             vision=original_request.get("vision", ""),
             mood=original_request.get("mood", ""),
