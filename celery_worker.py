@@ -88,34 +88,19 @@ def upload_to_gcs(local_path, destination_blob_name):
 # --- The Celery Task Definition ---
 
 @celery_app.task
+@celery_app.task
 def create_video_task(task_id, audio_url, original_request):
-    logger.info(f"--- [CELERY WORKER] Starting video task {task_id} ---")
-    local_audio_path = None
-    images = []
-    final_video_path = None
+    # ... (code inside try block) ...
     try:
         local_audio_path = download_audio(audio_url)
-        y, sr = librosa.load(local_audio_path)
-        _, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
-        num_images = max(8, len(beat_frames) // 2)
-        num_prompts = num_images // 2
-
-        image_prompts = get_image_prompts_from_gemini(
-            vision=original_request.get('vision', ''),
-            mood=original_request.get('mood', ''),
-            age=original_request.get('age', ''),
-            num_prompts=num_prompts
-        )
-
-        images = generate_images(image_prompts, num_images)
+        # ... (rest of your video creation logic) ...
         final_video_path = assemble_video(local_audio_path, images)
-        
         upload_to_gcs(final_video_path, f"complete/{task_id}.mp4")
         logger.info(f"--- [CELERY WORKER] Successfully completed task {task_id} ---")
 
-   except Exception as e:
+    except Exception as e: # This 'except' must be correctly indented
         logger.error(f"!!! [CELERY WORKER] FAILED task {task_id}: {e} !!!", exc_info=True)
-    finally:
+    finally: # This 'finally' must be aligned with 'try' and 'except'
         # Rename the local audio file instead of deleting it
         if local_audio_path and os.path.exists(local_audio_path):
             new_audio_path = local_audio_path.replace('.mp3', '_DONE.mp3')
@@ -123,6 +108,6 @@ def create_video_task(task_id, audio_url, original_request):
             logger.info(f"Audio file renamed to: {new_audio_path}")
 
         # Clean up other temporary files (video and images)
-        cleanup_files = [final_video_path] + images # local_audio_path is removed from this list
+        cleanup_files = [final_video_path] + images
         for p in cleanup_files:
             if p and os.path.exists(p): os.remove(p)
