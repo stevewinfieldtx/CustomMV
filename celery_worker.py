@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Celery will get these from the worker's environment
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
 RUNWARE_API_KEY = os.getenv('RUNWARE_API_KEY')
-RUNWARE_API_URL = os.getenv('RUNWARE_API_URL', 'https://api.runware.ai/v1/generate')
+RUNWARE_API_URL = os.getenv('RUNWARE_API_URL', 'https://api.runware.ai/v1')
 GCS_BUCKET_NAME = os.getenv('GCS_BUCKET_NAME')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
