@@ -12,11 +12,9 @@ from PIL import Image
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from moviepy.audio.io.AudioFileClip import AudioFileClip
 
-# --- Configure logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Get environment variables ---
 # Celery will get these from the worker's environment
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
 RUNWARE_API_KEY = os.getenv('RUNWARE_API_KEY')
