@@ -5,13 +5,12 @@ import logging
 import json
 import librosa
 import itertools
-import uuid  # Added: For UUID generation
+import uuid
 from celery import Celery
 from google.cloud import storage
 from PIL import Image
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from moviepy.audio.io.AudioFileClip import AudioFileClip
-from moviepy.editor import AudioFileClip as MoviePyAudioFileClip # Renamed to avoid conflict with AudioFileClip from moviepy.audio.io
 
 # --- Configure logging ---
 logging.basicConfig(
@@ -22,8 +21,9 @@ logger = logging.getLogger(__name__)
 # --- Get environment variables ---
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 RUNWARE_API_KEY = os.getenv("RUNWARE_API_KEY")
-# Corrected URL: Removed /generate as per user clarification
-RUNWARE_API_URL = os.getenv("RUNWARE_API_URL", "https://api.runware.ai/v1") 
+RUNWARE_API_URL = os.getenv(
+    "RUNWARE_API_URL", "https://api.runware.ai/v1"
+)
 GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -36,7 +36,6 @@ def get_image_prompts_from_gemini(vision, mood, age, num_prompts):
     if not GEMINI_API_KEY:
         raise Exception("Missing GEMINI_API_KEY")
     prompt = f"Generate {num_prompts} unique, vivid AI art prompts based on the theme '{vision}', with a '{mood}' mood for a '{age}' audience. Return as a JSON list of strings."
-    # Corrected Gemini model name to gemini-2.5-flash
     url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     resp = requests.post(
         url,
@@ -74,16 +73,11 @@ def generate_images(prompts, num_images):
     for i in range(num_images):
         current_prompt = next(prompt_cycle)
         logger.info(f"Requesting image {i+1}/{num_images} from Runware AI...")
-        
-        # Corrected payload based on debugging:
-        # - Removed "lora" and "CFGScale"
-        # - Corrected "positivePrompt" to use current_prompt
-        # - Model "runware:100@1" as it was the previous base model for Runware
         payload = [{
             "taskType":      "imageInference",
             "taskUUID":      str(uuid.uuid4()),
             "positivePrompt": current_prompt,
-            "model":         "runware:100@1", 
+            "model":         "runware:100@1",
             "width":         896,
             "height":        1152,
             "steps": 12,
@@ -94,28 +88,22 @@ def generate_images(prompts, num_images):
         }]
         
         resp = requests.post(RUNWARE_API_URL, headers=headers, json=payload)
-        
-        # Added for debugging: Log raw response from Runware AI before checking status
         logger.info(f"Runware API Raw Response for image {i+1}: {resp.text}")
-        
-        resp.raise_for_status() # This line will raise HTTPError if status code is 4xx/5xx
+        resp.raise_for_status()
         if resp.json().get("images"):
             image_urls.extend(resp.json()["images"])
-        else:
-            logger.warning(f"Runware AI response for image {i+1} did not contain 'images' key.")
 
     paths = []
-    # --- Added robust error handling for image downloads ---
     for i, url in enumerate(image_urls):
         try:
             logger.info(f"Downloading image {i+1}/{len(image_urls)} from URL: {url}")
-            r = requests.get(url, stream=True) # Use stream=True for large files
-            r.raise_for_status() # Crucial: Raise HTTPError for bad responses from image URL!
+            r = requests.get(url, stream=True)
+            r.raise_for_status()
             
             fd, path = tempfile.mkstemp(suffix=".jpeg")
             os.close(fd)
             with open(path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192): # Stream content to file
+                for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
             paths.append(path)
             logger.info(f"Successfully downloaded image {i+1} to {path}")
@@ -129,22 +117,19 @@ def generate_images(prompts, num_images):
 
 def assemble_video(audio_path, image_paths):
     duration = librosa.get_duration(path=audio_path)
-    # Ensure fps is calculated correctly even if image_paths could theoretically be empty at this point
-    fps = len(image_paths) / duration if duration > 0 and len(image_paths) > 0 else 24 
+    fps = len(image_paths) / duration if duration > 0 and len(image_paths) > 0 else 24
     
-    # Check if image_paths is empty and handle it (e.g., create a placeholder if desired)
     if not image_paths:
         logger.error("No images available for video assembly. Creating a placeholder image.")
-        # Create a simple black image as a placeholder to prevent MoviePy error
         img_placeholder = Image.new('RGB', (896, 1152), color = 'black')
         fd, placeholder_path = tempfile.mkstemp(suffix=".jpeg")
         os.close(fd)
         img_placeholder.save(placeholder_path)
-        image_paths = [placeholder_path] # Use the placeholder
-        fps = 1 # 1 frame per second for placeholder
+        image_paths = [placeholder_path]
+        fps = 1
         
     clip = ImageSequenceClip(image_paths, fps=fps)
-    audio_clip = MoviePyAudioFileClip(audio_path) # Use MoviePyAudioFileClip to avoid conflict
+    audio_clip = AudioFileClip(audio_path)
     final = clip.set_audio(audio_clip).set_duration(audio_clip.duration)
     fd, path = tempfile.mkstemp(suffix=".mp4")
     os.close(fd)
@@ -159,44 +144,37 @@ def upload_to_gcs(local_path, destination_blob_name):
     blob.make_public()
     return blob.public_url
 
-# --- The Celery Task Definition ---
-
-@celery_app.task 
+@celery_app.task
 def create_video_task(task_id, audio_url, original_request):
     logger.info(f"--- [CELERY WORKER] Starting video task {task_id} ---")
-    local_audio_path = None # Initialize to None for finally block safety
-    images = [] # Initialize to empty list for finally block safety
-    final_video_path = None # Initialize to None for finally block safety
-    truncated_audio_path = None # Initialize to None for finally block safety
+    local_audio_path = None
+    images = []
+    final_video_path = None
+    truncated_audio_path = None
     try:
         local_audio_path = download_audio(audio_url)
-        y, sr = librosa.load(local_audio_path) # Load full audio initially
+        y, sr = librosa.load(local_audio_path)
         
-        # --- Determine desired duration in seconds from original_request ---
         desired_length_tag = original_request.get('length', 'medium').lower()
-        desired_duration_sec = 60 # Default to medium
+        desired_duration_sec = 60
         if 'short' in desired_length_tag:
             desired_duration_sec = 30
         elif 'long' in desired_length_tag:
             desired_duration_sec = 90
         
-        # Calculate num_images based on desired duration (e.g., 0.5 images per second)
-        num_images = max(8, int(desired_duration_sec * 0.5)) # Cap images by desired duration
-        num_prompts = num_images // 2 
+        num_images = max(8, int(desired_duration_sec * 0.5))
+        num_prompts = num_images // 2
 
         logger.info(f"Task {task_id}: Desired video length: {desired_duration_sec}s, Num images to generate: {num_images}")
 
-        # --- Truncate audio to desired length before assembling video ---
-        full_audio_clip = MoviePyAudioFileClip(local_audio_path) # Use MoviePyAudioFileClip
-        
-        # Ensure the subclip does not exceed the actual audio duration
+        full_audio_clip = AudioFileClip(local_audio_path)
         final_audio_duration = min(desired_duration_sec, full_audio_clip.duration)
         truncated_audio_clip = full_audio_clip.subclip(0, final_audio_duration)
-
+        
         fd_trunc, truncated_audio_path = tempfile.mkstemp(suffix=".mp3")
         os.close(fd_trunc)
         truncated_audio_clip.write_audiofile(truncated_audio_path, codec="aac")
-        truncated_audio_clip.close() # Close to release resources
+        truncated_audio_clip.close()
 
         image_prompts = get_image_prompts_from_gemini(
             vision=original_request.get('vision', ''),
@@ -206,8 +184,6 @@ def create_video_task(task_id, audio_url, original_request):
         )
 
         images = generate_images(image_prompts, num_images)
-        
-        # Assemble video using the TRUNCATED audio and generated images
         final_video_path = assemble_video(truncated_audio_path, images)
         
         upload_to_gcs(final_video_path, f"complete/{task_id}.mp4")
@@ -216,13 +192,11 @@ def create_video_task(task_id, audio_url, original_request):
     except Exception as e:
         logger.error(f"!!! [CELERY WORKER] FAILED task {task_id}: {e} !!!", exc_info=True)
     finally:
-        # Rename the original local audio file (full length)
         if local_audio_path and os.path.exists(local_audio_path):
             new_audio_path = local_audio_path.replace('.mp3', '_DONE.mp3')
             os.rename(local_audio_path, new_audio_path)
             logger.info(f"Original audio file renamed to: {new_audio_path}")
 
-        # Clean up other temporary files (truncated audio, final video, images)
         cleanup_files = [truncated_audio_path, final_video_path] + images
         for p in cleanup_files:
             if p and os.path.exists(p): os.remove(p)
