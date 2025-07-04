@@ -2,6 +2,7 @@ import os
 import tempfile
 import requests
 import logging
+import uuid
 import json
 import librosa
 import itertools
