@@ -1,85 +1,153 @@
-from flask import Flask, render_template, request, jsonify
 import os
+import tempfile
+import requests
 import logging
-from dotenv import load_dotenv
-import music_creator
-from celery_worker import create_video_task # Import the new task
+import json
+import librosa
+import itertools
+import uuid  # For UUID generation
+from celery import Celery
+from google.cloud import storage
+from PIL import Image
+from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
+from moviepy.audio.io.AudioFileClip import AudioFileClip
 
-# Load environment variables
-load_dotenv()
-
-# Configure logging
-log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
-logging.basicConfig(level=getattr(logging, log_level), format='%(asctime)s - %(levelname)s - %(message)s')
+# --- Configure logging ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__, static_folder='static', template_folder='templates')
+# --- Get environment variables ---
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+RUNWARE_API_KEY = os.getenv("RUNWARE_API_KEY")
+RUNWARE_API_URL = os.getenv("RUNWARE_API_URL", "https://api.runware.ai/v1")
+GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# --- We no longer need the complex SSE/Queue logic ---
-# A simple dictionary to hold original request data is enough
-tasks_data = {} 
+# --- Initialize Celery ---
+celery_app = Celery("tasks", broker=REDIS_URL)
 
-@app.route('/', methods=['GET'])
-def index():
-    return render_template('index.html')
+# --- Helper Functions ---
+def get_image_prompts_from_gemini(vision, mood, age, num_prompts):
+    if not GEMINI_API_KEY:
+        raise Exception("Missing GEMINI_API_KEY")
+    prompt = f"Generate {num_prompts} unique, vivid AI art prompts based on the theme '{vision}', with a '{mood}' mood for a '{age}' audience. Return as a JSON list of strings."
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    resp = requests.post(
+        url,
+        json={"contents": [{"parts": [{"text": prompt}]}]},
+        headers={"Content-Type": "application/json"},
+    )
+    resp.raise_for_status()
+    cleaned_text = (
+        resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        .strip()
+        .replace("```json", "")
+        .replace("```", "")
+        .strip()
+    )
+    return json.loads(cleaned_text)
 
-@app.route('/create', methods=['POST'])
-def create():
-    data = request.get_json() or {}
-    logger.info(f"Create request: {data}")
+def download_audio(url):
+    resp = requests.get(url)
+    resp.raise_for_status()
+    fd, path = tempfile.mkstemp(suffix=".mp3")
+    os.close(fd)
+    with open(path, "wb") as f:
+        f.write(resp.content)
+    return path
+
+def generate_images(prompts, num_images):
+    if not RUNWARE_API_KEY:
+        raise Exception("RUNWARE_API_KEY is not set.")
+    headers = {
+        "Authorization": f"Bearer {RUNWARE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    image_urls = []
+    prompt_cycle = itertools.cycle(prompts)
+    for i in range(num_images):
+        current_prompt = next(prompt_cycle)
+        logger.info(f"Requesting image {i+1}/{num_images}...")
+        payload = [{
+            "taskType": "imageInference",
+            "taskUUID": str(uuid.uuid4()),
+            "positivePrompt": current_prompt,
+            "model": "runware:100@1",
+            "width": 896,
+            "height": 1152,
+            "steps": 12,
+            "scheduler": "DPM++ 3M",
+            "numberResults": 1,
+            "outputType": "URL",
+            "checkNSFW": True
+        }]
+        resp = requests.post(RUNWARE_API_URL, headers=headers, json=payload)
+        logger.info(f"Runware API Raw Response: {resp.text}")
+        resp.raise_for_status()
+        if resp.json().get("images"):
+            image_urls.extend(resp.json()["images"])
+    paths = []
+    for url in image_urls:
+        r = requests.get(url)
+        fd, path = tempfile.mkstemp(suffix=".jpeg")
+        os.close(fd)
+        with open(path, "wb") as f:
+            f.write(r.content)
+        paths.append(path)
+    return paths
+
+def assemble_video(audio_path, image_paths):
+    duration = librosa.get_duration(path=audio_path)
+    fps = len(image_paths) / duration if duration > 0 else 24
+    clip = ImageSequenceClip(image_paths, fps=fps)
+    audio_clip = AudioFileClip(audio_path)
+    final = clip.set_audio(audio_clip).set_duration(audio_clip.duration)
+    fd, path = tempfile.mkstemp(suffix=".mp4")
+    os.close(fd)
+    final.write_videofile(path, codec="libx264", audio_codec="aac")
+    return path
+
+def upload_to_gcs(local_path, destination_blob_name):
+    client = storage.Client()
+    bucket = client.bucket(GCS_BUCKET_NAME)
+    blob = bucket.blob(destination_blob_name)
+    blob.upload_from_filename(local_path)
+    blob.make_public()
+    return blob.public_url
+
+@celery_app.task
+def create_video_task(task_id, audio_url, original_request):
+    logger.info(f"--- [CELERY WORKER] Starting video task {task_id} ---")
+    local_audio_path = None
+    images = []
+    final_video_path = None
     try:
-        tags = music_creator.get_tags_from_gemini(
-            target=data.get('artist','') or data.get('vision',''),
-            kind='artist' if data.get('artist') else 'vision',
-            length=data.get('length'),
-            mood=data.get('mood'),
-            age=data.get('age')
+        local_audio_path = download_audio(audio_url)
+        y, sr = librosa.load(local_audio_path)
+        _, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
+        num_images = max(8, len(beat_frames) // 2)
+        num_prompts = num_images // 2
+        image_prompts = get_image_prompts_from_gemini(
+            vision=original_request.get("vision", ""),
+            mood=original_request.get("mood", ""),
+            age=original_request.get("age", ""),
+            num_prompts=num_prompts,
         )
-        task_id = music_creator.start_music_generation(tags)
-        logger.info(f"Music task started: {task_id}")
-
-        # Store the original request data to be used in the callback
-        tasks_data[task_id] = data
-        
-        # --- Return a simple success message to the frontend ---
-        return jsonify({'success': True, 'message': f"Music task {task_id} started. Video will be created in the background."})
+        images = generate_images(image_prompts, num_images)
+        final_video_path = assemble_video(local_audio_path, images)
+        upload_to_gcs(final_video_path, f"complete/{task_id}.mp4")
+        logger.info(f"--- [CELERY WORKER] Successfully completed task {task_id} ---")
     except Exception as e:
-        logger.error("Failed during task creation", exc_info=True)
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/music-callback', methods=['POST'])
-def music_callback():
-    try:
-        payload = request.get_json()
-        if not payload: return 'Empty payload', 400
-
-        callback_data = payload.get('data', {})
-        if callback_data.get('callbackType') != 'complete':
-            return 'Intermediate callback', 200
-
-        task_id = callback_data.get('task_id')
-        song_list = callback_data.get('data', [])
-        audio_url = next((song.get('audio_url') for song in song_list if song.get('audio_url')), None)
-
-        if not task_id or not audio_url:
-            return 'Missing data', 400
-        
-        original_request = tasks_data.pop(task_id, {}) # Get and remove data
-        if not original_request:
-            return 'Unknown task', 200
-
-        # --- THIS IS THE KEY CHANGE ---
-        # Instead of doing the work here, we send it to our Celery worker.
-        # .delay() sends the task to the Redis queue.
-        create_video_task.delay(task_id, audio_url, original_request)
-        logger.info(f"Task {task_id} sent to Celery worker.")
-
-    except Exception as e:
-        logger.error(f"Error in music callback: {e}", exc_info=True)
-        return 'Internal Server Error', 500
-
-    return '', 204
-
-if __name__ == '__main__':
-    port = int(os.getenv('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+        logger.error(f"!!! [CELERY WORKER] FAILED task {task_id}: {e} !!!", exc_info=True)
+    finally:
+        if local_audio_path and os.path.exists(local_audio_path):
+            new_audio_path = local_audio_path.replace(".mp3", "_DONE.mp3")
+            os.rename(local_audio_path, new_audio_path)
+            logger.info(f"Audio file renamed to: {new_audio_path}")
+        cleanup_files = [final_video_path] + images
+        for p in cleanup_files:
+            if p and os.path.exists(p):
+                os.remove(p)
