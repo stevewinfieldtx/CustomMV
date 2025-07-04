@@ -11,6 +11,7 @@ from google.cloud import storage
 from PIL import Image
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from moviepy.audio.io.AudioFileClip import AudioFileClip
+from pydub import AudioSegment  # For trimming audio to bucket
 
 # --- Configure logging ---
 logging.basicConfig(
@@ -29,11 +30,37 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 # --- Initialize Celery ---
 celery_app = Celery("tasks", broker=REDIS_URL)
 
+# --- Duration Bucket Helpers ---
+def categorize_length(seconds: float):
+    """Map any duration to XS/S/M/L/XL buckets."""
+    choices = [30, 60, 120, 180, 240]
+    target = next((c for c in choices if seconds <= c), 240)
+    label_map = {30: "XS", 60: "S", 120: "M", 180: "L", 240: "XL"}
+    return label_map[target], target
+
+
+def trim_to_bucket(input_path: str, target_secs: int) -> str:
+    """Trim an audio file to the first target_secs seconds."""
+    song = AudioSegment.from_file(input_path)
+    trimmed = song[: target_secs * 1000]
+    out = input_path.replace(".mp3", f"_{target_secs}s.mp3")
+    trimmed.export(out, format="mp3")
+    return out
+
 # --- Helper Functions ---
-def get_image_prompts_from_gemini(vision, mood, age, num_prompts):
+def get_image_prompts_from_gemini(vision, mood, age, num_prompts, duration_label=None, duration_secs=None):
     if not GEMINI_API_KEY:
         raise Exception("Missing GEMINI_API_KEY")
-    prompt = f"Generate {num_prompts} unique, vivid AI art prompts based on the theme '{vision}', with a '{mood}' mood for a '{age}' audience. Return as a JSON list of strings."
+    # Build prompt lines
+    lines = [
+        f"Generate {num_prompts} unique, vivid AI art prompts based on the theme '{vision}',",
+        f"with a '{mood}' mood for a '{age}' audience."
+    ]
+    if duration_label and duration_secs:
+        lines.append(f"Duration category: {duration_label} ({duration_secs} sec)")
+    lines.append("Return as a JSON list of strings.")
+    prompt = ' '.join(lines)
+
     url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     resp = requests.post(
         url,
@@ -50,6 +77,7 @@ def get_image_prompts_from_gemini(vision, mood, age, num_prompts):
     )
     return json.loads(cleaned_text)
 
+
 def download_audio(url):
     resp = requests.get(url)
     resp.raise_for_status()
@@ -58,6 +86,7 @@ def download_audio(url):
     with open(path, "wb") as f:
         f.write(resp.content)
     return path
+
 
 def generate_images(prompts, num_images):
     if not RUNWARE_API_KEY:
@@ -87,17 +116,25 @@ def generate_images(prompts, num_images):
         resp = requests.post(RUNWARE_API_URL, headers=headers, json=payload)
         logger.info(f"Runware API Raw Response: {resp.text}")
         resp.raise_for_status()
-        if resp.json().get("images"):
-            image_urls.extend(resp.json()["images"])
+        data_list = resp.json().get("data", [])
+        for entry in data_list:
+            url = entry.get("imageURL") or entry.get("imageUrl")
+            if url:
+                image_urls.append(url)
+    if not image_urls:
+        raise Exception("No images returned from Runware API.")
+
     paths = []
     for url in image_urls:
         r = requests.get(url)
+        r.raise_for_status()
         fd, path = tempfile.mkstemp(suffix=".jpeg")
         os.close(fd)
         with open(path, "wb") as f:
             f.write(r.content)
         paths.append(path)
     return paths
+
 
 def assemble_video(audio_path, image_paths):
     duration = librosa.get_duration(path=audio_path)
@@ -110,6 +147,7 @@ def assemble_video(audio_path, image_paths):
     final.write_videofile(path, codec="libx264", audio_codec="aac")
     return path
 
+
 def upload_to_gcs(local_path, destination_blob_name):
     client = storage.Client()
     bucket = client.bucket(GCS_BUCKET_NAME)
@@ -118,6 +156,7 @@ def upload_to_gcs(local_path, destination_blob_name):
     blob.make_public()
     return blob.public_url
 
+
 @celery_app.task
 def create_video_task(task_id, audio_url, original_request):
     logger.info(f"--- [CELERY WORKER] Starting video task {task_id} ---")
@@ -125,17 +164,30 @@ def create_video_task(task_id, audio_url, original_request):
     images = []
     final_video_path = None
     try:
+        # Download and trim audio to bucket
         local_audio_path = download_audio(audio_url)
+        actual_duration = librosa.get_duration(path=local_audio_path)
+        bucket_label, bucket_secs = categorize_length(actual_duration)
+        local_audio_path = trim_to_bucket(local_audio_path, bucket_secs)
+        logger.info(f"Trimmed audio to bucket {bucket_label} ({bucket_secs}s)")
+
+        # Beat-based image count
         y, sr = librosa.load(local_audio_path)
         _, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
         num_images = max(8, len(beat_frames) // 2)
         num_prompts = num_images // 2
+
+        # Generate Gemini-driven prompts, include duration info
         image_prompts = get_image_prompts_from_gemini(
             vision=original_request.get("vision", ""),
             mood=original_request.get("mood", ""),
             age=original_request.get("age", ""),
             num_prompts=num_prompts,
+            duration_label=bucket_label,
+            duration_secs=bucket_secs,
         )
+
+        # Image generation + video assembly
         images = generate_images(image_prompts, num_images)
         final_video_path = assemble_video(local_audio_path, images)
         upload_to_gcs(final_video_path, f"complete/{task_id}.mp4")
@@ -143,11 +195,12 @@ def create_video_task(task_id, audio_url, original_request):
     except Exception as e:
         logger.error(f"!!! [CELERY WORKER] FAILED task {task_id}: {e} !!!", exc_info=True)
     finally:
+        # Rename and cleanup
         if local_audio_path and os.path.exists(local_audio_path):
             new_audio_path = local_audio_path.replace(".mp3", "_DONE.mp3")
             os.rename(local_audio_path, new_audio_path)
             logger.info(f"Audio file renamed to: {new_audio_path}")
-        cleanup_files = [final_video_path] + images
+        cleanup_files = ([final_video_path] if final_video_path else []) + images
         for p in cleanup_files:
             if p and os.path.exists(p):
                 os.remove(p)
