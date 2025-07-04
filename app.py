@@ -1,153 +1,48 @@
-import os
-import tempfile
-import requests
-import logging
-import json
-import librosa
-import itertools
-import uuid  # For UUID generation
-from celery import Celery
-from google.cloud import storage
-from PIL import Image
-from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
-from moviepy.audio.io.AudioFileClip import AudioFileClip
+document.addEventListener('DOMContentLoaded', () => {
+    const form = document.getElementById('videoForm');
+    const btn = document.getElementById('submitButton');
+    const resultDiv = document.getElementById('result');
+    const originalButtonText = 'Create My Music Video';
 
-# --- Configure logging ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
+    form.addEventListener('submit', async e => {
+        e.preventDefault();
+        btn.disabled = true;
+        btn.innerHTML = `<span class="loading-spinner"></span>Creating...`;
+        
+        try {
+            const fd = new FormData(form);
+            const payload = {
+                mood: fd.get('mood'),
+                age: fd.get('age'),
+                pricing: fd.get('pricing'),
+                length: parseInt(fd.get('length'), 10),  // now numeric seconds
+                artist: fd.get('artist'),
+                vision: fd.get('vision')
+            };
+            
+            const createResponse = await fetch('/create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
 
-# --- Get environment variables ---
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-RUNWARE_API_KEY = os.getenv("RUNWARE_API_KEY")
-RUNWARE_API_URL = os.getenv("RUNWARE_API_URL", "https://api.runware.ai/v1")
-GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+            const data = await createResponse.json();
+            if (!createResponse.ok) throw new Error(data.error);
+            
+            resultDiv.innerHTML = `
+                <div class="result-card success-card">
+                    <h3 class="result-title success-title"><i class="fas fa-check-circle"></i> Success!</h3>
+                    <div class="result-content">
+                        <p>${data.message}</p>
+                        <p>Please check your Google Cloud Storage 'complete' folder for the final ${payload.length}s video in a few minutes.</p>
+                    </div>
+                </div>`;
 
-# --- Initialize Celery ---
-celery_app = Celery("tasks", broker=REDIS_URL)
-
-# --- Helper Functions ---
-def get_image_prompts_from_gemini(vision, mood, age, num_prompts):
-    if not GEMINI_API_KEY:
-        raise Exception("Missing GEMINI_API_KEY")
-    prompt = f"Generate {num_prompts} unique, vivid AI art prompts based on the theme '{vision}', with a '{mood}' mood for a '{age}' audience. Return as a JSON list of strings."
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-    resp = requests.post(
-        url,
-        json={"contents": [{"parts": [{"text": prompt}]}]},
-        headers={"Content-Type": "application/json"},
-    )
-    resp.raise_for_status()
-    cleaned_text = (
-        resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-        .strip()
-        .replace("```json", "")
-        .replace("```", "")
-        .strip()
-    )
-    return json.loads(cleaned_text)
-
-def download_audio(url):
-    resp = requests.get(url)
-    resp.raise_for_status()
-    fd, path = tempfile.mkstemp(suffix=".mp3")
-    os.close(fd)
-    with open(path, "wb") as f:
-        f.write(resp.content)
-    return path
-
-def generate_images(prompts, num_images):
-    if not RUNWARE_API_KEY:
-        raise Exception("RUNWARE_API_KEY is not set.")
-    headers = {
-        "Authorization": f"Bearer {RUNWARE_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    image_urls = []
-    prompt_cycle = itertools.cycle(prompts)
-    for i in range(num_images):
-        current_prompt = next(prompt_cycle)
-        logger.info(f"Requesting image {i+1}/{num_images}...")
-        payload = [{
-            "taskType": "imageInference",
-            "taskUUID": str(uuid.uuid4()),
-            "positivePrompt": current_prompt,
-            "model": "runware:100@1",
-            "width": 896,
-            "height": 1152,
-            "steps": 12,
-            "scheduler": "DPM++ 3M",
-            "numberResults": 1,
-            "outputType": "URL",
-            "checkNSFW": True
-        }]
-        resp = requests.post(RUNWARE_API_URL, headers=headers, json=payload)
-        logger.info(f"Runware API Raw Response: {resp.text}")
-        resp.raise_for_status()
-        if resp.json().get("images"):
-            image_urls.extend(resp.json()["images"])
-    paths = []
-    for url in image_urls:
-        r = requests.get(url)
-        fd, path = tempfile.mkstemp(suffix=".jpeg")
-        os.close(fd)
-        with open(path, "wb") as f:
-            f.write(r.content)
-        paths.append(path)
-    return paths
-
-def assemble_video(audio_path, image_paths):
-    duration = librosa.get_duration(path=audio_path)
-    fps = len(image_paths) / duration if duration > 0 else 24
-    clip = ImageSequenceClip(image_paths, fps=fps)
-    audio_clip = AudioFileClip(audio_path)
-    final = clip.set_audio(audio_clip).set_duration(audio_clip.duration)
-    fd, path = tempfile.mkstemp(suffix=".mp4")
-    os.close(fd)
-    final.write_videofile(path, codec="libx264", audio_codec="aac")
-    return path
-
-def upload_to_gcs(local_path, destination_blob_name):
-    client = storage.Client()
-    bucket = client.bucket(GCS_BUCKET_NAME)
-    blob = bucket.blob(destination_blob_name)
-    blob.upload_from_filename(local_path)
-    blob.make_public()
-    return blob.public_url
-
-@celery_app.task
-def create_video_task(task_id, audio_url, original_request):
-    logger.info(f"--- [CELERY WORKER] Starting video task {task_id} ---")
-    local_audio_path = None
-    images = []
-    final_video_path = None
-    try:
-        local_audio_path = download_audio(audio_url)
-        y, sr = librosa.load(local_audio_path)
-        _, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
-        num_images = max(8, len(beat_frames) // 2)
-        num_prompts = num_images // 2
-        image_prompts = get_image_prompts_from_gemini(
-            vision=original_request.get("vision", ""),
-            mood=original_request.get("mood", ""),
-            age=original_request.get("age", ""),
-            num_prompts=num_prompts,
-        )
-        images = generate_images(image_prompts, num_images)
-        final_video_path = assemble_video(local_audio_path, images)
-        upload_to_gcs(final_video_path, f"complete/{task_id}.mp4")
-        logger.info(f"--- [CELERY WORKER] Successfully completed task {task_id} ---")
-    except Exception as e:
-        logger.error(f"!!! [CELERY WORKER] FAILED task {task_id}: {e} !!!", exc_info=True)
-    finally:
-        if local_audio_path and os.path.exists(local_audio_path):
-            new_audio_path = local_audio_path.replace(".mp3", "_DONE.mp3")
-            os.rename(local_audio_path, new_audio_path)
-            logger.info(f"Audio file renamed to: {new_audio_path}")
-        cleanup_files = [final_video_path] + images
-        for p in cleanup_files:
-            if p and os.path.exists(p):
-                os.remove(p)
+        } catch (err) {
+            resultDiv.innerHTML = `<div class="result-card error-card"><h3>Error</h3><p>${err.message}</p></div>`;
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = `<i class="fas fa-magic"></i> ${originalButtonText}`;
+        }
+    });
+});
