@@ -1,4 +1,4 @@
-import os
+ulerimport os
 import tempfile
 import requests
 import logging
@@ -88,7 +88,7 @@ def generate_images(prompts, num_images):
                 "width": 896,
                 "height": 1152,
                 "steps": 12,
-                "scheduler": "DPM++ 3M",
+                "scheduler": "Euler",
                 "checkNSFW": True
             }
         ]
