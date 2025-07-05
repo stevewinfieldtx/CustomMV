@@ -32,9 +32,11 @@ def get_tags_from_gemini(target: str,
         f'https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash'
         f':generateContent?key={api_key}'
     )
-    resp = requests.post(url,
-                         json={'contents': [{'parts': [{'text': prompt}]}]},
-                         headers={'Content-Type': 'application/json'})
+    resp = requests.post(
+        url,
+        json={'contents': [{'parts': [{'text': prompt}]}]},
+        headers={'Content-Type': 'application/json'}
+    )
     resp.raise_for_status()
 
     try:
@@ -46,7 +48,6 @@ def get_tags_from_gemini(target: str,
     if not candidates or not isinstance(candidates, list):
         raise Exception(f"No candidates in Gemini response: {body}")
 
-    # extract text
     text = (candidates[0].get('content', {})
             .get('parts', [{}])[0]
             .get('text', ''))
@@ -71,7 +72,7 @@ def start_music_generation(prompt: str, callback_url: str) -> str:
         'customMode': False,
         'instrumental': True,
         'model': 'V4_5',
-        'callBackUrl': callback_url
+        'callbackUrl': callback_url  # correct key name
     }
     resp = requests.post(
         'https://apibox.erweima.ai/api/v1/generate',
