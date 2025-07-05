@@ -47,6 +47,11 @@ def trim_to_bucket(input_path: str, target_secs: int) -> str:
     trimmed.export(out, format="mp3")
     return out
 
+# Once `trimmed_audio_path` is ready:
+gcs_audio_path = f"audio/{task_id}_{bucket_secs}s.mp3"
+audio_gcs_url = upload_to_gcs(trimmed_audio_path, gcs_audio_path)
+logger.info(f"Uploaded trimmed audio to GCS: {audio_gcs_url}")
+
 # --- Helper Functions ---
 def get_image_prompts_from_gemini(vision, mood, age, num_prompts, duration_label=None, duration_secs=None):
     if not GEMINI_API_KEY:
