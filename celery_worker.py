@@ -21,11 +21,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Environment variables ---
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-RUNWARE_API_KEY = os.getenv("RUNWARE_API_KEY")
-RUNWARE_API_URL = os.getenv("RUNWARE_API_URL", "https://api.runware.ai/v1")
-GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+REDIS_URL        = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+RUNWARE_API_KEY  = os.getenv("RUNWARE_API_KEY")
+RUNWARE_API_URL  = os.getenv("RUNWARE_API_URL", "https://api.runware.ai/v1")
+GCS_BUCKET_NAME  = os.getenv("GCS_BUCKET_NAME")
+GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")
+APIBOX_KEY       = os.getenv("APIBOX_KEY")
 
 # --- Initialize Celery ---
 celery_app = Celery("tasks", broker=REDIS_URL)
@@ -56,6 +57,14 @@ def download_audio(url: str) -> str:
         f.write(resp.content)
     return path
 
+def upload_to_gcs(local_path, destination_blob_name):
+    client = storage.Client()
+    bucket = client.bucket(GCS_BUCKET_NAME)
+    blob = bucket.blob(destination_blob_name)
+    blob.upload_from_filename(local_path)
+    blob.make_public()
+    return blob.public_url
+
 def get_image_prompts_from_gemini(vision, mood, age, num_prompts):
     if not GEMINI_API_KEY:
         raise Exception("Missing GEMINI_API_KEY")
@@ -81,14 +90,6 @@ def get_image_prompts_from_gemini(vision, mood, age, num_prompts):
         .strip()
     )
     return json.loads(text)
-
-def upload_to_gcs(local_path, destination_blob_name):
-    client = storage.Client()
-    bucket = client.bucket(GCS_BUCKET_NAME)
-    blob = bucket.blob(destination_blob_name)
-    blob.upload_from_filename(local_path)
-    blob.make_public()
-    return blob.public_url
 
 def generate_images(prompts, num_images):
     if not RUNWARE_API_KEY:
@@ -194,3 +195,27 @@ def create_video_task(task_id, audio_url, original_request):
         for p in ([final_video_path] + images):
             if p and os.path.exists(p):
                 os.remove(p)
+
+@celery_app.task
+def poll_music_status(task_id, original_request):
+    """
+    Poll Apibox until music is ready, then trigger create_video_task.
+    """
+    if not APIBOX_KEY:
+        raise Exception("Missing APIBOX_KEY")
+    headers = {'Authorization': f'Bearer {APIBOX_KEY}'}
+    status_url = f"https://apibox.erweima.ai/api/v1/generate/{task_id}"
+    resp = requests.get(status_url, headers=headers)
+    resp.raise_for_status()
+    data = resp.json().get('data', {})
+    state = data.get('state') or data.get('status')
+    if state in ('complete','finished','success'):
+        audio_url = data.get('audio_url') or data.get('result',{}).get('audioUrl')
+        if not audio_url:
+            raise Exception(f"No audio_url in completion response: {resp.text}")
+        create_video_task.delay(task_id, audio_url, original_request)
+    elif state in ('pending','running','processing'):
+        # try again in 15s
+        poll_music_status.apply_async((task_id, original_request), countdown=15)
+    else:
+        raise Exception(f"Music generation failed: {resp.text}")
