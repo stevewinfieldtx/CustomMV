@@ -74,7 +74,7 @@ def start_music_generation(prompt: str, callback_url: str) -> str:
         'customMode': False,
         'instrumental': True,
         'model': 'V4_5',
-        'callbackUrl': callback_url
+        'callBackUrl': callback_url  # ensure proper casing for Apibox
     }
     resp = requests.post(
         'https://apibox.erweima.ai/api/v1/generate',
