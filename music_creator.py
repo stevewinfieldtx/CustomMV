@@ -55,7 +55,6 @@ def get_tags_from_gemini(target: str,
     tags = [t.strip() for t in text.split(',') if t.strip()]
     return ', '.join(tags)
 
-
 def start_music_generation(prompt: str, callback_url: str) -> str:
     api_key = os.getenv('APIBOX_KEY')
     if not api_key:
