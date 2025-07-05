@@ -1,5 +1,7 @@
+#music_creator.py
 import os
 import requests
+from urllib.parse import urljoin
 
 
 def get_tags_from_gemini(target: str,
@@ -72,7 +74,7 @@ def start_music_generation(prompt: str, callback_url: str) -> str:
         'customMode': False,
         'instrumental': True,
         'model': 'V4_5',
-        'callbackUrl': callback_url  # correct key name
+        'callbackUrl': callback_url
     }
     resp = requests.post(
         'https://apibox.erweima.ai/api/v1/generate',
