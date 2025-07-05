@@ -150,7 +150,7 @@ def create_video_task(task_id, audio_url, original_request):
     logger.info(f"--- [CELERY WORKER] Starting video task {task_id} ---")
     local_audio_path, images, final_video_path = None, [], None
     try:
-        # 1) Download & trim to bucket
+        # 1) Download & trim
         local_audio_path = download_audio(audio_url)
         secs = librosa.get_duration(path=local_audio_path)
         label, bucket_secs = categorize_length(secs)
@@ -168,7 +168,7 @@ def create_video_task(task_id, audio_url, original_request):
         num_images = max(8, len(beat_frames) // 2)
         num_prompts = num_images // 2
 
-        # 4) Gemini for image prompts
+        # 4) Gemini prompts
         prompts = get_image_prompts_from_gemini(
             vision=original_request.get("vision",""),
             mood=original_request.get("mood",""),
@@ -176,10 +176,10 @@ def create_video_task(task_id, audio_url, original_request):
             num_prompts=num_prompts
         )
 
-        # 5) Runware image generation
+        # 5) Generate images
         images = generate_images(prompts, num_images)
 
-        # 6) Assemble and upload final video
+        # 6) Assemble & upload video
         final_video_path = assemble_video(local_audio_path, images)
         video_blob = f"complete/{task_id}.mp4"
         video_url = upload_to_gcs(final_video_path, video_blob)
@@ -188,7 +188,6 @@ def create_video_task(task_id, audio_url, original_request):
     except Exception as e:
         logger.error(f"!!! Task {task_id} FAILED: {e}", exc_info=True)
     finally:
-        # Cleanup
         if local_audio_path and os.path.exists(local_audio_path):
             done = local_audio_path.replace(".mp3","_DONE.mp3")
             os.rename(local_audio_path, done)
@@ -199,23 +198,29 @@ def create_video_task(task_id, audio_url, original_request):
 @celery_app.task
 def poll_music_status(task_id, original_request):
     """
-    Poll Apibox until music is ready, then trigger create_video_task.
+    Poll Suno/Apibox until the MP3 is ready, then enqueue the video task.
     """
     if not APIBOX_KEY:
         raise Exception("Missing APIBOX_KEY")
-    headers = {'Authorization': f'Bearer {APIBOX_KEY}'}
-    status_url = f"https://apibox.erweima.ai/api/v1/generate/{task_id}"
-    resp = requests.get(status_url, headers=headers)
+    # Correct endpoint & query param
+    status_url = "https://apibox.erweima.ai/api/v1/generate/record-info"
+    resp = requests.get(status_url,
+                        headers={'Authorization': f'Bearer {APIBOX_KEY}'},
+                        params={'task_id': task_id})
     resp.raise_for_status()
-    data = resp.json().get('data', {})
-    state = data.get('state') or data.get('status')
-    if state in ('complete','finished','success'):
-        audio_url = data.get('audio_url') or data.get('result',{}).get('audioUrl')
+    body = resp.json()
+    data = body.get('data', {})
+    state = data.get('status') or data.get('state')
+    if state == "SUCCESS":
+        entries = data.get('data', [])
+        if not entries:
+            raise Exception(f"No audio entries in record-info: {body}")
+        audio_url = entries[0].get('audio_url') or entries[0].get('audioUrl')
         if not audio_url:
-            raise Exception(f"No audio_url in completion response: {resp.text}")
+            raise Exception(f"No audio_url in record-info entry: {entries[0]}")
         create_video_task.delay(task_id, audio_url, original_request)
-    elif state in ('pending','running','processing'):
-        # try again in 15s
+    elif state in ("PENDING", "TEXT_SUCCESS", "FIRST_SUCCESS"):
+        # retry after 15 seconds
         poll_music_status.apply_async((task_id, original_request), countdown=15)
     else:
-        raise Exception(f"Music generation failed: {resp.text}")
+        raise Exception(f"Music generation failed: {body}")
